@@ -1,0 +1,7 @@
+streamlit
+groq
+python-dotenv
+gspread
+google-auth
+pymupdf
+pillow
