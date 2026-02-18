@@ -1,4 +1,3 @@
-import os
 import json
 import fitz
 import base64
@@ -8,7 +7,7 @@ from groq import Groq
 import streamlit as st
 import gspread
 
-# CONFIG
+# PAGE CONFIG
 
 st.set_page_config(
     page_title="Invoice OCR & Structured Extraction",
@@ -16,11 +15,12 @@ st.set_page_config(
     layout="wide"
 )
 
-# Load API Key from Streamlit Secrets
+# LOAD API KEY (Streamlit Cloud)
+
 groq_api_key = st.secrets["GROQ_API_KEY"]
 client = Groq(api_key=groq_api_key)
 
-# OCR + LLM FUNCTIONS
+# OCR FUNCTIONS
 
 def pdf_to_images(file, dpi=200):
     file.seek(0)
@@ -67,12 +67,10 @@ Return only raw extracted text.
 
 def extract_invoice_fields(text):
     prompt = f"""
-Extract structured invoice data from the text below.
-Do NOT explain.
-Return EXACT JSON only.
+Extract structured invoice data.
+Return ONLY valid JSON.
 
 Schema:
-
 {{
 "Vendor":{{"BusinessName":null,"Address":null,"GSTIN":null,"Phone":null,"Email":null}},
 "Buyer":{{"Name":null,"BillingAddress":null,"ShippingAddress":null,"GSTIN":null,"Phone":null,"Email":null}},
@@ -94,9 +92,9 @@ TEXT:
 
 
 def process_document(uploaded_file):
+
     filename = uploaded_file.name.lower()
     uploaded_file.seek(0)
-
     full_text = ""
 
     if filename.endswith(".pdf"):
@@ -111,10 +109,9 @@ def process_document(uploaded_file):
         structured_data = json.loads(extract_invoice_fields(full_text))
         return structured_data
     except:
-        st.error("Invalid JSON returned from LLM")
         return None
 
-# GOOGLE SHEETS 
+# GOOGLE SHEETS
 
 def get_gsheet(sheet_name):
     try:
@@ -123,12 +120,15 @@ def get_gsheet(sheet_name):
         sh = gc.open(sheet_name)
         return sh.sheet1
     except Exception as e:
-        st.error(f"Google Sheets error: {e}")
+        st.error(f"Google Sheets connection error: {e}")
         return None
 
 
 def get_service_account_email():
-    return st.secrets["gcp_service_account"]["client_email"]
+    try:
+        return st.secrets["gcp_service_account"]["client_email"]
+    except:
+        return None
 
 
 def save_invoice_to_sheet(sheet, data):
@@ -138,7 +138,6 @@ def save_invoice_to_sheet(sheet, data):
     totals = data.get("Totals", {})
     payment = data.get("PaymentDetails", {})
 
-    # ONLY the 16 requested fields
     row = [
         vendor.get("BusinessName"),
         vendor.get("Address"),
@@ -162,7 +161,7 @@ def save_invoice_to_sheet(sheet, data):
         sheet.append_row(row)
         return True
     except Exception as e:
-        st.error(f"Error saving to sheet: {e}")
+        st.error(f"Error writing to sheet: {e}")
         return False
 
 # UI
@@ -194,25 +193,46 @@ if uploaded_file:
         st.subheader("File Details")
         st.write("Name:", uploaded_file.name)
         st.write("Size:", f"{len(uploaded_file.getvalue())/1024:.1f} KB")
-        parse_btn = st.button("🚀 Extract & Parse")
 
-    if parse_btn:
-        with st.spinner("Processing document..."):
-            result = process_document(uploaded_file)
+        if st.button("🚀 Extract & Parse"):
+            with st.spinner("Processing document..."):
+                result = process_document(uploaded_file)
 
-        if result:
-            st.subheader("Extracted Invoice Data")
-            st.json(result)
+            if result:
+                st.session_state["parsed_invoice"] = result
+                st.success("✅ Extraction complete!")
+            else:
+                st.error("❌ Failed to extract invoice data.")
 
-            sheet_name = st.text_input("Google Sheet Name", value="invoice-corrected")
+# SHOW RESULTS (PERSISTENT)
 
-            st.info(f"Share the sheet with: {get_service_account_email()} (Editor)")
+if "parsed_invoice" in st.session_state:
 
-            if st.button("💾 Save to Google Sheets"):
-                sheet = get_gsheet(sheet_name)
-                if sheet and save_invoice_to_sheet(sheet, result):
-                    st.success("✅ Invoice saved successfully!")
-                else:
-                    st.error("Failed to save invoice.")
+    st.subheader("Extracted Invoice Data")
+    st.json(st.session_state["parsed_invoice"])
+
+    sheet_name = st.text_input(
+        "Google Sheet Name",
+        value="invoice-corrected"
+    )
+
+    sa_email = get_service_account_email()
+    if sa_email:
+        st.info(f"Share the sheet with: {sa_email} (Editor)")
+
+    if st.button("💾 Save to Google Sheets"):
+
+        sheet = get_gsheet(sheet_name)
+
+        if sheet:
+            success = save_invoice_to_sheet(
+                sheet,
+                st.session_state["parsed_invoice"]
+            )
+
+            if success:
+                st.success("✅ Invoice saved successfully!")
+            else:
+                st.error("❌ Failed to save invoice.")
         else:
-            st.error("Failed to extract invoice data.")
+            st.error("❌ Could not connect to Google Sheets.")
